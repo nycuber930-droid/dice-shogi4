@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>サイコロ将棋</title>
+<style>
+*{box-sizing:border-box}
+:root{
+  padding-top:env(safe-area-inset-top,0px);
+  padding-bottom:env(safe-area-inset-bottom,0px);
+  --bg:#f6f1e7;--fg:#222;--cell:#e9d9b4;
+  --line:#a58b55;--panel:#fffaf0
+}
+@media(prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#1d1b17;--fg:#eee;--panel:#2a2722
+  }
+}
+:root[data-theme="dark"]{--bg:#1d1b17;--fg:#eee;--panel:#2a2722}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{
+  margin:0;background:var(--bg);color:var(--fg);
+  font-family:"Hiragino Sans","Yu Gothic",sans-serif;
+  padding:12px;overflow-x:auto
+}
+h1{font-size:20px;margin:0 0 12px}
+.wrap{
+  display:flex;gap:24px;flex-wrap:wrap;
+  align-items:flex-start
+}
+#game{overflow:visible;padding:12px 4px 24px}
+#board{
+  position:relative;
+  display:grid;
+  grid-template-columns:repeat(8,min(11vw,54px));
+  border:3px solid var(--line);
+  transform:perspective(1000px) rotateX(27deg);
+  transform-origin:center center;
+  transform-style:preserve-3d;
+  box-shadow:0 12px 18px #0002
+}
+.c{
+  aspect-ratio:1;
+  background:var(--cell);
+  border:1px solid var(--line);
+  position:relative
+}
+.c.start{background:#e0675a}
+.c.goal{background:#f7d63c}
+.c.opt{cursor:pointer}
+.c.opt::after{
+  content:"";position:absolute;inset:14%;
+  border:4px solid #1f9d55;border-radius:50%
+}
+.cube{
+  position:absolute;inset:7%;
+  background:linear-gradient(135deg,#444,#000);
+  border-radius:4px
+}
+#dice{
+  position:absolute;pointer-events:none;
+  perspective:700px;transform-style:preserve-3d
+}
+#cube{
+  position:absolute;inset:0;
+  transform-style:preserve-3d
+}
+.f{
+  position:absolute;left:0;top:0;
+  backface-visibility:hidden
+}
+.f svg,.nf svg{width:100%;height:100%;display:block}
+#net{
+  display:grid;grid-template-columns:repeat(3,52px);
+  grid-auto-rows:52px;gap:2px;
+  background:var(--panel);padding:8px;
+  border-radius:8px;width:max-content
+}
+.nf.top{outline:3px solid #1f9d55;outline-offset:1px}
+#msg{min-height:1.6em;margin:12px 0;font-weight:bold}
+button{
+  font-size:15px;padding:7px 12px;margin:0 6px 6px 0;
+  border-radius:6px;border:1px solid var(--line);
+  background:var(--panel);color:var(--fg)
+}
+small{
+  display:block;max-width:270px;
+  margin-top:8px;line-height:1.7
+}
+@media(max-width:480px){
+  .wrap{gap:16px}
+  #board{grid-template-columns:repeat(8,min(10.5vw,44px))}
+}
+</style>
+</head>
+<body>
+
+<h1>サイコロ将棋 <span id="lv"></span></h1>
+
+<div class="wrap">
+  <div id="game">
+    <div id="board"></div>
+    <div id="msg"></div>
+    <button id="reset">最初からやり直す</button>
+    <button id="reroll">別の盤面にする</button>
+    <button id="next" hidden>次のレベルへ</button>
+  </div>
+
+  <div>
+    <div id="net"></div>
+    <small>
+      展開図（緑の枠＝今の上面）。どの目でも進むのは1マス。
+      ①は矢印の向きに前後左右、②は矢印の向きに斜め（一方向だけ）、
+      ③は両端の方向に斜め、④⑥は上下左右、
+      ⑤は前後左右と斜め全方向。
+      ①が上面に出ると、赤いスタート地点に戻り、サイコロの向きも初期状態に戻ります。
+      レベルが上がるごとに黒い立方体が2個ずつ増えます。盤面はすぐに生成されます。
+      斜め移動では盤面に沿って180°転がります。
+    </small>
+  </div>
+</div>
+
+<script>
+const $=i=>document.getElementById(i);
+
+const F={
+  1:[0,0,1],6:[0,0,-1],
+  2:[1,0,0],5:[-1,0,0],
+  3:[0,1,0],4:[0,-1,0]
+};
+
+const U={1:[0,1,0],2:[0,1,1],3:[1,0,1]};
+
+const BASIS={
+  1:[[1,0,0],[0,1,0]],
+  3:[[1,0,0],[0,0,-1]],
+  4:[[1,0,0],[0,0,1]],
+  2:[[0,0,-1],[0,1,0]],
+  5:[[0,0,1],[0,1,0]],
+  6:[[1,0,0],[0,-1,0]]
+};
+
+const NV={1:[0,1],2:[-1,1],3:[1,-1]};
+
+const rf=p=>p[0]&&p[1]
+  ?(s=>v=>[-s*v[1],-s*v[0],-v[2]])(p[0]*p[1])
+  :p[0]>0?v=>[v[2],v[1],-v[0]]
+  :p[0]<0?v=>[-v[2],v[1],v[0]]
+  :p[1]>0?v=>[v[0],v[2],-v[1]]
+  :v=>[v[0],-v[2],v[1]];
+
+const world=(R,v)=>[0,1,2].map(i=>
+  Math.round(v[0]*R[0][i]+v[1]*R[1][i]+v[2]*R[2][i])
+);
+
+const topF=R=>+Object.keys(F).find(n=>world(R,F[n])[2]==1);
+
+const R0=[[1,0,0],[0,1,0],[0,0,1]];
+const START={x:3,y:0,R:R0};
+
+let S,goal,cubes,opts,level=1,won=false,busy=false;
+
+const blockedIn=cs=>(x,y)=>cs.some(q=>q[0]==x&&q[1]==y);
+
+function mv(s,d,bl){
+  const x=s.x+d[0],y=s.y+d[1];
+
+  if(x<0||x>7||y<0||y>7||bl(x,y))return null;
+
+  const diag=d[0]&&d[1];
+
+  const ax=diag
+    ?[-d[1]/Math.SQRT2,d[0]/Math.SQRT2,0]
+    :[-d[1],d[0],0];
+
+  return{
+    x,y,
+    R:s.R.map(rf(d)),
+    ax,ang:diag?Math.PI:Math.PI/2
+  };
+}
+
+function moves(s,bl){
+  const t=topF(s.R);
+
+  const card=[[1,0],[-1,0],[0,1],[0,-1]];
+  const dg=[[1,1],[1,-1],[-1,1],[-1,-1]];
+
+  let ds;
+
+  if(t==1||t==2){
+    const a=world(s.R,U[t]);
+    ds=[[a[0],a[1]]];
+  }else if(t==3){
+    const a=world(s.R,U[3]);
+    ds=[[a[0],a[1]],[-a[0],-a[1]]];
+  }else{
+    ds=t==5?[...card,...dg]:card;
+  }
+
+  return ds.map(d=>mv(s,d,bl)).filter(Boolean);
+}
+
+const key=s=>s.x+","+s.y+","+s.R.join();
+
+function newLevel(){
+  won=false;
+  goal={x:Math.random()*8|0,y:4+(Math.random()*4|0)};
+
+  // 経路数の探索は行わず、障害物をランダム配置して即座に開始する。
+  const k=Math.min((level-1)*2,62);
+  const cand=[];
+  for(let x=0;x<8;x++){
+    for(let y=1;y<8;y++){
+      if(!(x===goal.x&&y===goal.y)&&!(x===START.x&&y===1))cand.push([x,y]);
+    }
+  }
+  for(let i=cand.length-1;i>0;i--){
+    const j=Math.random()*(i+1)|0;
+    [cand[i],cand[j]]=[cand[j],cand[i]];
+  }
+  cubes=cand.slice(0,k);
+  resetPos(`レベル${level}：黒い立方体 ${k}個`);
+}
+
+function resetPos(m){
+  S={...START,R:START.R};
+  opts=moves(S,blockedIn(cubes));
+  say(m||'');
+  render();
+}
+
+const say=t=>$('msg').textContent=t;
+
+// サイコロの各面
+function face(n,ax,ay){
+  const L=Math.hypot(ax,ay)||1;
+  const dx=ax/L,dy=-ay/L;
+
+  const P=(x,y,r=8,color="#222")=>
+    `<circle cx="${x}" cy="${y}" r="${r}" fill="${color}"/>`;
+
+  const ar=(x1,y1,x2,y2)=>{
+    const a=Math.atan2(y2-y1,x2-x1);
+    const len=13;
+    const f=d=>
+      `${x2-len*Math.cos(a+d)},${y2-len*Math.sin(a+d)}`;
+
+    return `
+      <line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"
+        stroke="#222" stroke-width="4" stroke-linecap="round"/>
+      <polygon points="${x2},${y2} ${f(.55)} ${f(-.55)}"
+        fill="#222"/>
+    `;
+  };
+
+  let s=`
+    <svg viewBox="0 0 100 100">
+      <rect x="2" y="2" width="96" height="96"
+        rx="12" fill="#fff" stroke="#555" stroke-width="3"/>
+  `;
+
+  if(n===1){
+    s+=P(50,50,18,"#d62d20");
+  }
+
+  if(n===2){
+    const x1=50-dx*22,y1=50-dy*22;
+    const x2=50+dx*22,y2=50+dy*22;
+    const gap=9;
+
+    s+=ar(x1+dx*gap,y1+dy*gap,x2-dx*gap,y2-dy*gap);
+    s+=P(x1,y1)+P(x2,y2);
+  }
+
+  if(n===3){
+    const x1=50-dx*26,y1=50-dy*26;
+    const x2=50+dx*26,y2=50+dy*26;
+    const gap=9;
+
+    s+=ar(50+dx*gap,50+dy*gap,x2-dx*gap,y2-dy*gap);
+    s+=ar(50-dx*gap,50-dy*gap,x1+dx*gap,y1+dy*gap);
+    s+=P(x1,y1)+P(x2,y2)+P(50,50);
+  }
+
+  if(n===4||n===5){
+    [[28,28],[72,28],[28,72],[72,72]]
+      .forEach(a=>s+=P(...a));
+  }
+
+  if(n===5)s+=P(50,50);
+
+  if(n===6){
+    [[30,26],[30,50],[30,74],[70,26],[70,50],[70,74]]
+      .forEach(a=>s+=P(...a));
+  }
+
+  return s+'</svg>';
+}
+
+const M3=(a,b,c,t)=>`matrix3d(${a},0,${b},0,${c},0,${t},1)`;
+
+function buildDice(D){
+  const d=$('dice');
+  d.style.width=d.style.height=D+'px';
+
+  let h='<div id="cube">';
+
+  for(const n in BASIS){
+    const[r,u]=BASIS[n],nm=F[n],hh=D/2;
+
+    h+=`<div class="f" style="width:${D}px;height:${D}px;
+      transform:${M3(r,u.map(v=>-v),nm,nm.map(v=>v*hh))}">
+      ${face(+n,...(NV[n]||[0,0]))}
+    </div>`;
+  }
+
+  d.innerHTML=h+'</div>';
+}
+
+function place(x,y,R,lift=0){
+  const c=$('board').firstElementChild;
+  const p=c.offsetWidth,D=p*.86,d=$('dice');
+
+  d.style.left=(x*p+(p-D)/2)+'px';
+  d.style.top=((7-y)*p+(p-D)/2-lift)+'px';
+
+  $('cube').style.transform=M3(
+    ...R.map(v=>[v[0],-v[1],v[2]]),
+    [0,0,0]
+  ).replace(/,0,(?=[-\d.e]+,[-\d.e]+,[-\d.e]+,0,)/,',0,');
+}
+
+function render(){
+  let h='';
+
+  for(let r=0;r<8;r++){
+    for(let c=0;c<8;c++){
+      const y=7-r;
+
+      let cl='c'+
+        (c==START.x&&y==START.y?' start':'')+
+        (goal.x==c&&goal.y==y?' goal':'');
+
+      const cu=cubes.some(q=>q[0]==c&&q[1]==y)
+        ?'<div class="cube"></div>':'';
+
+      if(!won&&opts.some(o=>o.x==c&&o.y==y))cl+=' opt';
+
+      h+=`<div class="${cl}" data-c="${c}" data-y="${y}">${cu}</div>`;
+    }
+  }
+
+  const b=$('board');
+  b.innerHTML=h+'<div id="dice"></div>';
+
+  buildDice(b.firstElementChild.offsetWidth*.86);
+  place(S.x,S.y,S.R);
+
+  const t=topF(S.R);
+
+  const lay=[
+    [3,1,0],[5,0,1],[1,1,1],
+    [2,2,1],[4,1,2],[6,1,3]
+  ];
+
+  $('net').innerHTML=lay.map(([n,c,r])=>
+    `<div class="nf${n==t?' top':''}"
+      style="grid-column:${c+1};grid-row:${r+1}">
+      ${face(n,...(NV[n]||[0,0]))}
+    </div>`
+  ).join('');
+
+  $('lv').textContent='レベル '+level;
+  $('next').hidden=!won;
+}
+
+// ベクトルを軸のまわりに回転
+const rod=(v,a,th)=>{
+  const c=Math.cos(th),s=Math.sin(th);
+  const d=a[0]*v[0]+a[1]*v[1]+a[2]*v[2];
+
+  const x=[
+    a[1]*v[2]-a[2]*v[1],
+    a[2]*v[0]-a[0]*v[2],
+    a[0]*v[1]-a[1]*v[0]
+  ];
+
+  return[0,1,2].map(i=>
+    v[i]*c+x[i]*s+a[i]*d*(1-c)
+  );
+};
+
+// サイコロの向きを、合法な90度回転の連続で初期向きR0へ戻す
+function orientationPath(fromR,targetR=R0){
+  const dirs=[[1,0],[-1,0],[0,1],[0,-1]];
+  const keyR=R=>R.map(r=>r.join(",")).join("|");
+  const targetKey=keyR(targetR);
+  const queue=[{R:fromR,path:[]}];
+  const seen=new Set([keyR(fromR)]);
+
+  while(queue.length){
+    const cur=queue.shift();
+    if(keyR(cur.R)===targetKey)return cur.path;
+
+    for(const d of dirs){
+      const nextR=cur.R.map(rf(d));
+      const k=keyR(nextR);
+      if(seen.has(k))continue;
+      seen.add(k);
+      queue.push({R:nextR,path:[...cur.path,d]});
+    }
+  }
+  return [];
+}
+
+function animateOrientationReset(done){
+  const path=orientationPath(S.R,R0);
+  const step=i=>{
+    if(i>=path.length){
+      S={x:START.x,y:START.y,R:R0};
+      place(S.x,S.y,S.R);
+      done();
+      return;
+    }
+    const d=path[i];
+    const from={x:START.x,y:START.y,R:S.R};
+    const to={x:START.x,y:START.y,R:S.R.map(rf(d))};
+    const ax=[-d[1],d[0],0];
+    anim(from,to,ax,Math.PI/2,()=>{
+      S=to;
+      step(i+1);
+    });
+  };
+  step(0);
+}
+
+// 11フレームで転がり、最後に小さく揺れて止まる
+function anim(from,to,ax,ang,cb){
+  busy=true;
+
+  const frames=11;
+  const settleFrames=5;
+  let k=0;
+
+  const id=setInterval(()=>{
+    k++;
+
+    let x,y,R;
+
+    if(k<=frames){
+      const t=k/frames;
+
+      x=from.x+(to.x-from.x)*t;
+      y=from.y+(to.y-from.y)*t;
+
+      if(k===frames){
+        R=to.R;
+      }else if(ax&&ang){
+        // 終盤を少し減速させる
+        const eased=1-Math.pow(1-t,1.15);
+        R=from.R.map(v=>rod(v,ax,ang*eased));
+      }else{
+        R=from.R;
+      }
+
+      place(x,y,R);
+      return;
+    }
+
+    // 移動後、振幅が徐々に小さくなる揺れ
+    const j=k-frames;
+    const wobble=0.09*Math.sin(Math.PI*j/settleFrames);
+
+    R=to.R;
+
+    if(ax&&ang&&j<settleFrames){
+      R=to.R.map(v=>rod(v,ax,wobble));
+    }
+
+    place(to.x,to.y,R);
+
+    if(j>=settleFrames){
+      clearInterval(id);
+      busy=false;
+      place(to.x,to.y,to.R);
+      cb();
+    }
+  },35);
+}
+
+$('board').onclick=e=>{
+  const el=e.target.closest('.c');
+
+  if(!el||won||busy)return;
+
+  const m=opts.find(o=>
+    o.x==+el.dataset.c&&o.y==+el.dataset.y
+  );
+
+  if(!m)return;
+
+  opts=[];
+
+  anim(S,m,m.ax,m.ang,()=>{
+    S={x:m.x,y:m.y,R:m.R};
+
+    // ゴールに到達していれば、上面の目に関係なくクリアを優先
+    if(S.x==goal.x&&S.y==goal.y){
+      won=true;
+      say('🎉 クリア！');
+      return render();
+    }
+
+    // ゴール以外で1が上面に出たら、動けない時と同じ飛び戻り演出
+    if(topF(S.R)==1&&
+      (S.x!=START.x||S.y!=START.y)){
+      busy=true;
+      say('①が上面に出た…');
+      setTimeout(()=>animateReturnToStart('①が出たため、スタート地点に戻りました'),1000);
+      return;
+    }
+
+    fin('');
+  });
+};
+
+function animateReturnToStart(message){
+  const from={x:S.x,y:S.y,R:S.R};
+  const path=orientationPath(from.R,R0);
+  const frames=24; // 1秒・24フレーム
+  let frame=0;
+  busy=true;
+
+  const id=setInterval(()=>{
+    frame++;
+    const t=frame/frames;
+    const eased=t*t*(3-2*t);
+    const x=from.x+(START.x-from.x)*eased;
+    const y=from.y+(START.y-from.y)*eased;
+    // ふわっと浮き上がってからスタート地点へ飛び、最後に着地
+    const lift=58*4*t*(1-t);
+
+    let R=from.R;
+    if(path.length){
+      const progress=t*path.length;
+      const idx=Math.min(path.length-1,Math.floor(progress));
+      const frac=progress>=path.length?1:progress-idx;
+      const completed=progress>=path.length?path.length:idx;
+      for(let i=0;i<completed;i++) R=R.map(rf(path[i]));
+      if(progress<path.length){
+        const d=path[idx],ax=[-d[1],d[0],0];
+        R=R.map(v=>rod(v,ax,Math.PI/2*frac));
+      }
+    }
+
+    place(x,y,R,lift);
+
+    if(frame>=frames){
+      clearInterval(id);
+      S={...START,R:R0};
+      opts=moves(S,blockedIn(cubes));
+      busy=false;
+      say(message);
+      render();
+    }
+  },1000/24);
+}
+
+function fin(t){
+  opts=moves(S,blockedIn(cubes));
+
+  if(!opts.length){
+    // 動けない盤面を1秒見せてから、1の時と同じ24フレーム・1秒の飛び戻り
+    busy=true;
+    say('どこにも動けない…');
+    setTimeout(()=>animateReturnToStart('どこにも動けないため、スタート地点に戻りました'),1000);
+    return;
+  }
+
+  say(t);
+  render();
+}
+
+$('reset').onclick=()=>{
+  if(busy)return;
+  won=false;
+  resetPos('やり直し');
+};
+
+// レベルと障害物の個数は維持して、別の盤面を即時生成する。
+$('reroll').onclick=()=>{
+  if(busy)return;
+  newLevel();
+};
+
+$('next').onclick=()=>{
+  level++;
+  newLevel();
+};
+
+addEventListener('resize',()=>{
+  if(!busy)render();
+});
+
+newLevel();
+</script>
+</body>
+</html>
