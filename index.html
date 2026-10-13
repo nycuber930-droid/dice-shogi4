@@ -204,24 +204,64 @@ function moves(s,bl){
 
 const key=s=>s.x+","+s.y+","+s.R.join();
 
+// スタートからゴールまで、サイコロの向きと合法手を含めて幅優先探索する。
+function hasSolution(target, blocks){
+  const bl=blockedIn(blocks);
+  const start={x:START.x,y:START.y,R:R0};
+  const queue=[start];
+  let head=0;
+  const seen=new Set([key(start)]);
+  while(head<queue.length){
+    const cur=queue[head++];
+    if(cur.x===target.x&&cur.y===target.y)return true;
+    for(const n of moves(cur,bl)){
+      const k=key(n);
+      if(seen.has(k))continue;
+      seen.add(k);
+      queue.push({x:n.x,y:n.y,R:n.R});
+    }
+  }
+  return false;
+}
+
+function shuffled(a){
+  for(let i=a.length-1;i>0;i--){
+    const j=Math.random()*(i+1)|0;
+    [a[i],a[j]]=[a[j],a[i]];
+  }
+  return a;
+}
+
 function newLevel(){
   won=false;
-  goal={x:Math.random()*8|0,y:4+(Math.random()*4|0)};
-
-  // 経路数の探索は行わず、障害物をランダム配置して即座に開始する。
-  const k=Math.min((level-1)*2,62);
+  // ゴールと障害物をランダム生成し、解ける盤面だけを採用する。
+  const requested=Math.min((level-1)*2,52);
+  const target={x:Math.random()*8|0,y:4+(Math.random()*4|0)};
   const cand=[];
   for(let x=0;x<8;x++){
     for(let y=1;y<8;y++){
-      if(!(x===goal.x&&y===goal.y)&&!(x===START.x&&y===1))cand.push([x,y]);
+      if(!(x===target.x&&y===target.y)&&!(x===START.x&&y===1))cand.push([x,y]);
     }
   }
-  for(let i=cand.length-1;i>0;i--){
-    const j=Math.random()*(i+1)|0;
-    [cand[i],cand[j]]=[cand[j],cand[i]];
+
+  let count=requested, found=null, foundGoal=target;
+  // まず同じ立方体数で最大120回試す。難しすぎる場合だけ個数を下げる。
+  while(count>=0&&!found){
+    for(let attempt=0;attempt<120;attempt++){
+      const blocks=shuffled(cand.slice()).slice(0,count);
+      if(hasSolution(target,blocks)){found=blocks;break;}
+    }
+    if(!found)count--;
   }
-  cubes=cand.slice(0,k);
-  resetPos(`レベル${level}：黒い立方体 ${k}個`);
+  // 念のための保険。通常は上の探索で見つかる。
+  if(!found){
+    count=0;
+    found=[];
+    foundGoal={x:START.x,y:1};
+  }
+  goal=foundGoal;
+  cubes=found;
+  resetPos(`レベル${level}：黒い立方体 ${count}個`);
 }
 
 function resetPos(m){
