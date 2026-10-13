@@ -25,6 +25,9 @@ body{
   padding:12px;overflow-x:auto
 }
 h1{font-size:20px;margin:0 0 12px}
+.levelbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 12px}
+.levelbar label{font-size:15px;font-weight:700}
+#levelSelect{display:inline-block;visibility:visible;opacity:1;min-width:150px;min-height:42px;padding:8px 34px 8px 10px;font-size:16px;color:var(--fg);background:var(--panel);border:2px solid var(--line);border-radius:6px}
 .wrap{
   display:flex;gap:24px;flex-wrap:wrap;
   align-items:flex-start
@@ -100,10 +103,14 @@ small{
 
 <div class="wrap">
   <div id="game">
+    <div class="levelbar">
+      <label for="levelSelect">レベルを選ぶ</label>
+      <select id="levelSelect" aria-label="レベル選択"></select>
+    </div>
     <div id="board"></div>
     <div id="msg"></div>
     <button id="reset">最初からやり直す</button>
-    <button id="reroll">別の盤面にする</button>
+    <button id="reroll">このレベルをやり直す</button>
     <button id="next" hidden>次のレベルへ</button>
   </div>
 
@@ -115,7 +122,7 @@ small{
       ③は両端の方向に斜め、④⑥は上下左右、
       ⑤は前後左右と斜め全方向。
       ①が上面に出ると、赤いスタート地点に戻り、サイコロの向きも初期状態に戻ります。
-      レベルが上がるごとに黒い立方体が2個ずつ増えます。盤面はすぐに生成されます。
+      レベルごとに盤面は固定です。黒い立方体は最大20個です。
       斜め移動では盤面に沿って180°転がります。
     </small>
   </div>
@@ -204,64 +211,83 @@ function moves(s,bl){
 
 const key=s=>s.x+","+s.y+","+s.R.join();
 
-// スタートからゴールまで、サイコロの向きと合法手を含めて幅優先探索する。
-function hasSolution(target, blocks){
-  const bl=blockedIn(blocks);
-  const start={x:START.x,y:START.y,R:R0};
-  const queue=[start];
-  let head=0;
-  const seen=new Set([key(start)]);
-  while(head<queue.length){
-    const cur=queue[head++];
-    if(cur.x===target.x&&cur.y===target.y)return true;
-    for(const n of moves(cur,bl)){
-      const k=key(n);
-      if(seen.has(k))continue;
-      seen.add(k);
-      queue.push({x:n.x,y:n.y,R:n.R});
+// レベル番号から毎回同じ乱数列を作る。盤面は端末や再読み込みが変わっても固定。
+function seededRandom(seed){
+  let a=seed>>>0;
+  return ()=>{
+    a+=0x6D2B79F5;
+    let t=a;
+    t=Math.imul(t^(t>>>15),t|1);
+    t^=t+Math.imul(t^(t>>>7),t|61);
+    return ((t^(t>>>14))>>>0)/4294967296;
+  };
+}
+const stateKey=s=>`${s.x},${s.y}|${s.R.map(r=>r.join(',')).join(';')}`;
+
+// 障害物なしの盤面を探索し、実際の「1が出たらスタートへ戻る」ルールも再現する。
+function findGuaranteedRoute(rng){
+  const queue=[{x:START.x,y:START.y,R:START.R}];
+  const seen=new Map();
+  const parent=new Map();
+  const landing=new Map();
+  const firstKey=stateKey(queue[0]);
+  seen.set(firstKey,queue[0]);
+  parent.set(firstKey,null);
+  const reachableGoals=new Map();
+  const bl=()=>false;
+  for(let qi=0;qi<queue.length;qi++){
+    const cur=queue[qi], ck=stateKey(cur);
+    if(cur.y>=4 && !reachableGoals.has(`${cur.x},${cur.y}`)) reachableGoals.set(`${cur.x},${cur.y}`,ck);
+    for(const m of moves(cur,bl)){
+      const landedKey=`${m.x},${m.y}`;
+      const next=(topF(m.R)===1)
+        ?{x:START.x,y:START.y,R:START.R}:{x:m.x,y:m.y,R:m.R};
+      const nk=stateKey(next);
+      if(seen.has(nk)) continue;
+      seen.set(nk,next); parent.set(nk,ck); landing.set(nk,landedKey); queue.push(next);
     }
   }
-  return false;
-}
-
-function shuffled(a){
-  for(let i=a.length-1;i>0;i--){
-    const j=Math.random()*(i+1)|0;
-    [a[i],a[j]]=[a[j],a[i]];
+  const goals=[...reachableGoals.entries()];
+  if(!goals.length) return null;
+  const [pos,targetKey]=goals[Math.floor(rng()*goals.length)];
+  goal={x:+pos.split(',')[0],y:+pos.split(',')[1]};
+  let k=targetKey;
+  const routeCells=new Set([`${START.x},${START.y}`,`${goal.x},${goal.y}`]);
+  while(parent.get(k)!==null){
+    const land=landing.get(k);
+    if(land) routeCells.add(land);
+    const st=seen.get(k); routeCells.add(`${st.x},${st.y}`);
+    k=parent.get(k);
   }
-  return a;
+  return routeCells;
 }
 
 function newLevel(){
   won=false;
-  // ゴールと障害物をランダム生成し、解ける盤面だけを採用する。
-  const requested=Math.min((level-1)*2,52);
-  const target={x:Math.random()*8|0,y:4+(Math.random()*4|0)};
+  level=Math.max(1,Math.min(100,level|0));
+  const rng=seededRandom(930000+level*7919);
+  goal={x:3,y:7};
+  const route=findGuaranteedRoute(rng);
+  if(!route){
+    // 念のための安全策。障害物なしで開始する。
+    cubes=[];
+    resetPos(`レベル${level}：立方体 0個`);
+    return;
+  }
+  // 1〜100で段階的に増やし、最大20個に固定。
+  const k=Math.min(20,Math.floor((level-1)*20/99));
   const cand=[];
-  for(let x=0;x<8;x++){
-    for(let y=1;y<8;y++){
-      if(!(x===target.x&&y===target.y)&&!(x===START.x&&y===1))cand.push([x,y]);
-    }
+  for(let x=0;x<8;x++) for(let y=1;y<8;y++){
+    const cell=`${x},${y}`;
+    if(!route.has(cell) && !(x===START.x&&y===0) && !(x===goal.x&&y===goal.y)) cand.push([x,y]);
   }
-
-  let count=requested, found=null, foundGoal=target;
-  // まず同じ立方体数で最大120回試す。難しすぎる場合だけ個数を下げる。
-  while(count>=0&&!found){
-    for(let attempt=0;attempt<120;attempt++){
-      const blocks=shuffled(cand.slice()).slice(0,count);
-      if(hasSolution(target,blocks)){found=blocks;break;}
-    }
-    if(!found)count--;
+  for(let i=cand.length-1;i>0;i--){
+    const j=Math.floor(rng()*(i+1));
+    [cand[i],cand[j]]=[cand[j],cand[i]];
   }
-  // 念のための保険。通常は上の探索で見つかる。
-  if(!found){
-    count=0;
-    found=[];
-    foundGoal={x:START.x,y:1};
-  }
-  goal=foundGoal;
-  cubes=found;
-  resetPos(`レベル${level}：黒い立方体 ${count}個`);
+  cubes=cand.slice(0,Math.min(k,cand.length));
+  resetPos(`レベル${level}：黒い立方体 ${cubes.length}個`);
+  $('levelSelect').value=String(level);
 }
 
 function resetPos(m){
@@ -632,13 +658,21 @@ $('reset').onclick=()=>{
 // レベルと障害物の個数は維持して、別の盤面を即時生成する。
 $('reroll').onclick=()=>{
   if(busy)return;
-  newLevel();
+  resetPos(`レベル${level}：やり直し`);
 };
 
 $('next').onclick=()=>{
+  if(level>=100){say('全100レベルクリア！');return;}
   level++;
   newLevel();
 };
+
+for(let i=1;i<=100;i++) $('levelSelect').add(new Option(`レベル ${i}`,String(i)));
+$('levelSelect').addEventListener('change',e=>{
+  if(busy)return;
+  level=Number(e.target.value)||1;
+  newLevel();
+});
 
 addEventListener('resize',()=>{
   if(!busy)render();
